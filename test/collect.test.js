@@ -384,7 +384,12 @@ test('one call budget covers both phases, so a hang cannot double the time', asy
                 ],
               }
             : name === 'settings'
-              ? { describe: () => [{ ns: 'llm-delta', value: {} }] }
+              ? {
+                  describe: () => [
+                    { ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'ALPHA_KEY' } } },
+                    { ns: 'llm-delta', value: {} },
+                  ],
+                }
               : base.get(name),
     },
     { timeoutMs: 40 },
@@ -718,7 +723,13 @@ test('a dormant row is aborted without touching the store', async () => {
           ? {
               listProviders: () => [],
               listConfigurableProviders: () => [
-                { provider: 'gamma', displayName: 'Gamma', settingsNs: 'llm-gamma', settingsPath: ['profile'] },
+                {
+                  provider: 'gamma',
+                  displayName: 'Gamma',
+                  settingsNs: 'llm-gamma',
+                  settingsPath: ['profile'],
+                  nativeAuth: { env: ['GAMMA_KEY'], oauth: false },
+                },
               ],
               listModels: async () => [],
             }
@@ -738,6 +749,65 @@ test('a dormant row is aborted without touching the store', async () => {
   );
   assert.equal(calls, 0);
   assert.equal(value.providers[0].error, 'credential: aborted before the probe');
+});
+
+test('a late dormant row names the call budget, not the leftover', async () => {
+  const base = host();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'credentials'
+          ? {
+              describe: () => new Promise(() => {}),
+              describeRecord: async () => ({ configured: false, writable: true }),
+            }
+          : name === 'llm'
+            ? {
+                ...base.get('llm'),
+                listModels: async () => [],
+                listConfigurableProviders: () => [
+                  {
+                    provider: 'delta',
+                    displayName: 'Delta',
+                    settingsNs: 'llm-delta',
+                    settingsPath: ['profile'],
+                    nativeAuth: { env: ['DELTA_KEY'], oauth: false },
+                  },
+                ],
+              }
+            : name === 'settings'
+              ? {
+                  describe: () => [
+                    { ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'ALPHA_KEY' } } },
+                    { ns: 'llm-delta', value: {} },
+                  ],
+                }
+              : base.get(name),
+    },
+    { timeoutMs: 40 },
+  );
+  const dormant = value.providers.find((row) => row.provider === 'delta');
+  assert.equal(dormant.error, 'credential: timed out after 40 ms');
+});
+
+test('an Error whose message is not a string is still printable', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listModels: (provider) => {
+              if (provider !== 'beta') return Promise.resolve([]);
+              const error = new Error('x');
+              Object.assign(error, { message: { toString: () => 'obj message' } });
+              throw error;
+            },
+          }
+        : base.get(name),
+  });
+  const beta = value.providers.find((row) => row.provider === 'beta');
+  assert.equal(beta.error, 'catalog: obj message');
 });
 
 test('settings.describe runs once per call', async () => {
@@ -778,4 +848,66 @@ test('the provider filter also applies to dormant rows', async () => {
     ['zeta'],
   );
   assert.equal(value.providers[0].credential, CREDENTIALS.UNKNOWN);
+});
+
+test('a malformed apiKeyEnv outranks a stored sign-in record', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'settings'
+        ? { describe: () => [{ ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'bad name' } } }] }
+        : name === 'credentials'
+          ? {
+              describe: async () => ({ configured: false, writable: true }),
+              describeRecord: async () => ({ configured: true, writable: true }),
+            }
+          : base.get(name),
+  });
+  assert.equal(value.providers.find((row) => row.provider === 'alpha').credential, CREDENTIALS.UNKNOWN);
+});
+
+test('an unset apiKeyEnv is missing even with a stored sign-in record', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'settings'
+        ? { describe: () => [{ ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'ALPHA_KEY' } } }] }
+        : name === 'credentials'
+          ? {
+              describe: async () => ({ configured: false, writable: true }),
+              describeRecord: async () => ({ configured: true, writable: true }),
+            }
+          : base.get(name),
+  });
+  assert.equal(value.providers.find((row) => row.provider === 'alpha').credential, CREDENTIALS.MISSING);
+});
+
+test('a sign-in record is read for a route without OAuth too', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'groq', name: 'Groq' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'groq',
+                displayName: 'Groq',
+                settingsNs: 'llm-pi-ai',
+                settingsPath: ['providers', 'groq'],
+                nativeAuth: { env: ['GROQ_API_KEY'], oauth: false },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-pi-ai', value: { providers: { groq: {} } } }] }
+          : name === 'credentials'
+            ? {
+                describe: async () => ({ configured: false, writable: true }),
+                describeRecord: async () => ({ configured: true, writable: true }),
+              }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.CONFIGURED);
 });

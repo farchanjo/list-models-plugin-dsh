@@ -159,3 +159,44 @@ test('the caller signal reaches the collector', async () => {
   const value = await definition().execute({}, { signal: controller.signal });
   assert.ok(value.providers.every((row) => /aborted/.test(row.error)));
 });
+
+test('the provider filter is trimmed before it reaches the collector', async () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  const value = await definition().execute({ provider: '  alpha  ' }, {});
+  assert.deepEqual(
+    value.providers.map((row) => row.provider),
+    ['alpha'],
+  );
+});
+
+test('the render carries the error, note, truncation and effort lines', async () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  const tool = definition();
+  const value = {
+    generatedAt: '2026-01-01T00:00:00.000Z',
+    default: { provider: 'alpha', model: 'a', reasoningEffort: 'high' },
+    providers: [
+      {
+        provider: 'a',
+        name: 'A',
+        kind: 'active',
+        credential: 'missing',
+        error: 'catalog: boom',
+        models: [],
+        truncated: true,
+        note: 'a note',
+      },
+    ],
+    failures: [{ provider: 'a', message: 'catalog: boom' }],
+    counts: { providers: 1, active: 1, dormant: 0, models: 0, failures: 1 },
+    truncated: true,
+  };
+  const text = tool.output.render({}, value)[0].text;
+  assert.match(text, /default: alpha \/ a \(high\)/);
+  assert.match(text, /a note/);
+  assert.match(text, /error: catalog: boom/);
+  assert.match(text, /… truncated/);
+  assert.match(text, /provider list truncated/);
+});
