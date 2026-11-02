@@ -293,6 +293,111 @@ test('non-array registry answers are treated as empty', async () => {
   assert.equal(value.counts.providers, 0);
 });
 
+test('a malformed apiKeyEnv is unknown, not not-applicable', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'settings'
+        ? { describe: () => [{ ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'bad name' } } }] }
+        : base.get(name),
+  });
+  assert.equal(value.providers.find((row) => row.provider === 'alpha').credential, CREDENTIALS.UNKNOWN);
+});
+
+test('declared but unaddressable native env names are unknown', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'beta', name: 'Beta' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'beta',
+                displayName: 'Beta',
+                settingsNs: 'llm-beta',
+                settingsPath: ['profile'],
+                nativeAuth: { env: ['9bad'], oauth: true },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-beta', value: {} }] }
+          : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.UNKNOWN);
+});
+
+test('an unset variable on an OAuth-capable route is missing, not not-applicable', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'beta', name: 'Beta' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'beta',
+                displayName: 'Beta',
+                settingsNs: 'llm-beta',
+                settingsPath: ['profile'],
+                nativeAuth: { env: ['BETA_KEY'], oauth: true },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-beta', value: {} }] }
+          : name === 'credentials'
+            ? { describe: async () => ({ configured: false, writable: true }) }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.MISSING);
+});
+
+test('one call budget covers both phases, so a hang cannot double the time', async () => {
+  const base = host();
+  const started = Date.now();
+  await collectModels(
+    {
+      get: (name) =>
+        name === 'credentials'
+          ? { describe: () => new Promise(() => {}) }
+          : name === 'llm'
+            ? { ...base.get('llm'), listModels: async () => [] }
+            : base.get(name),
+    },
+    { timeoutMs: 40 },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 75, `one budget, not two: settled in ${elapsed} ms`);
+});
+
+test('the credential lookup and the catalog probe overlap', async () => {
+  const base = host();
+  const started = Date.now();
+  await collectModels(
+    {
+      get: (name) =>
+        name === 'credentials'
+          ? { describe: () => new Promise((resolve) => setTimeout(() => resolve({ configured: true }), 60)) }
+          : name === 'llm'
+            ? { ...base.get('llm'), listModels: () => new Promise((resolve) => setTimeout(() => resolve([]), 60)) }
+            : base.get(name),
+    },
+    { includeDormant: false },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 110, `stages run together: settled in ${elapsed} ms`);
+});
+
+test('a settled call leaves no timer behind', async () => {
+  await collectModels(host(), { timeoutMs: 600_000 });
+  const handles = process.getActiveResourcesInfo();
+  assert.equal(handles.filter((handle) => handle === 'Timeout').length, 0);
+});
+
 test('a context without the llm service fails loudly', async () => {
   await assert.rejects(() => collectModels({ get: () => undefined }), /llm service is not mounted/);
 });
@@ -402,7 +507,7 @@ test('an abort after the probes start fails them and releases the listeners', as
   await new Promise((resolve) => setTimeout(resolve, 10));
   controller.abort();
   const value = await pending;
-  assert.ok(value.providers.every((row) => row.error === 'credential: aborted' || /aborted/.test(row.error)));
+  assert.ok(value.providers.every((row) => /aborted/.test(row.error)));
   assert.equal(listeners, 0);
 });
 

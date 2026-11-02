@@ -98,9 +98,48 @@ test('a mounted registry with no route renders the empty sentence', async () => 
   assert.match(text, /no provider route is registered/);
 });
 
-test('a row that lost the llm service still fails loudly', async () => {
-  // `inject` keeps this from happening under Cordis; the collector guard backs it.
-  let captured;
-  apply({ get: () => undefined, tools: { register: (definition) => (captured = definition) } });
-  await assert.rejects(() => captured.execute({}, {}), /llm service is not mounted/);
+test('the render marks every state except configured', async () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  const tool = definition();
+  const unread = await tool.execute({ includeDormant: true }, {});
+  assert.match(tool.output.render({}, unread)[0].text, /alpha — Alpha \[unknown\]/);
+
+  const configured = {
+    ...ctx,
+    get: (name) =>
+      name === 'credentials'
+        ? { describe: async () => ({ configured: true, writable: true }) }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-alpha', value: { profile: { apiKeyEnv: 'ALPHA_KEY' } } }] }
+          : ctx.get(name),
+  };
+  // `ctx.llm` wins over `ctx.get('llm')`, so the override must live there.
+  const llm = {
+    ...ctx.get('llm'),
+    listConfigurableProviders: () => [
+      { provider: 'alpha', displayName: 'Alpha', settingsNs: 'llm-alpha', settingsPath: ['profile'] },
+      { provider: 'gamma', displayName: 'Gamma', settingsNs: 'llm-gamma', settingsPath: ['profile'] },
+    ],
+  };
+  const directory = { ...configured, llm };
+  apply(directory);
+  const text = definition()
+    .output.render({}, await definition().execute({}, {}))
+    .at(0).text;
+  assert.match(text, /alpha — Alpha\n/);
+  assert.match(text, /dormant, not-applicable\]/);
+});
+
+test('presentCall names the filter and presentResult titles the counts', async () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  const tool = definition();
+  assert.match(tool.presentCall({ provider: 'alpha' }).title, /alpha$/);
+  const value = await tool.execute({}, {});
+  const meta = tool.output.presentationMeta({}, value);
+  const view = tool.presentResult({}, { content: [{ type: 'text', text: 'x' }], isError: false, meta });
+  assert.match(view.title, /^1 active, 0 dormant, 1 models$/);
+  const failed = tool.presentResult({}, { content: [], isError: true, meta });
+  assert.match(failed.title, /\(failed\)$/);
 });

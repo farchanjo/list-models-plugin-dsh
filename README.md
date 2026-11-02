@@ -33,9 +33,10 @@ vanish from the answer. The inventory therefore joins two registry halves:
 One provider never sinks the answer. A throwing adapter, a rejected key
 lookup, or an unmounted `settings`/`credentials` service degrades that row —
 `error`, `unknown`, or an empty catalog — and the rest of the inventory still
-reports. Rows are built concurrently, each probe runs under a 5 s deadline, and
-the caller's abort signal cuts them short. The tool also stops at 500 models
-per provider and 200 providers, and flags truncation.
+reports. Rows are built concurrently under one 5 s budget for the whole call,
+and the caller's abort signal cuts them short. A credential lookup that fails
+still leaves the row's catalog intact, and both failures are reported. The tool
+also stops at 500 models per provider and 200 providers, and flags truncation.
 
 Nothing here resolves a model call or writes settings.
 
@@ -92,7 +93,7 @@ presenters receive a compact projection — `generatedAt`, `default`, `counts`,
 | --- | --- |
 | `configured` | the route declares an API-key reference and that reference is set |
 | `missing` | the route declares an API-key reference and that reference is unset |
-| `not-applicable` | nothing to be missing: the route declares no environment reference and either authenticates natively through OAuth or uses no key at all |
+| `not-applicable` | nothing to be missing: the route declares no environment reference at all, so it needs no key |
 | `unknown` | the probe could not run or could not answer, never a claim that the key is absent |
 
 The `note` "no credential; the adapter advertises nothing" is only attached
