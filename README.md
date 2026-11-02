@@ -33,10 +33,11 @@ vanish from the answer. The inventory therefore joins two registry halves:
 One provider never sinks the answer. A throwing adapter, a rejected key
 lookup, or an unmounted `settings`/`credentials` service degrades that row —
 `error`, `unknown`, or an empty catalog — and the rest of the inventory still
-reports. Rows are built concurrently under one 5 s budget for the whole call,
-and the caller's abort signal cuts them short. A credential lookup that fails
-still leaves the row's catalog intact, and both failures are reported. The tool
-also stops at 500 models per provider and 200 providers, and flags truncation.
+reports. Rows are built concurrently, the credential lookup and the catalog
+probe overlap, and one 5 s budget covers the whole call; the caller's abort
+signal cuts it short. A credential lookup that fails still leaves the row's
+catalog intact, and both failures are reported side by side. The tool also stops
+at 500 models per provider and 200 providers, and flags truncation.
 
 Nothing here resolves a model call or writes settings.
 
@@ -91,10 +92,15 @@ presenters receive a compact projection — `generatedAt`, `default`, `counts`,
 
 | Value | Means |
 | --- | --- |
-| `configured` | the route declares an API-key reference and that reference is set |
-| `missing` | the route declares an API-key reference and that reference is unset |
-| `not-applicable` | nothing to be missing: the route declares no environment reference at all, so it needs no key |
+| `configured` | a sign-in record is stored, or one of the route's credential references is set |
+| `missing` | the route declares credentials and none of them is set |
+| `not-applicable` | the route declares no reference at all and has no sign-in flow, so nothing can be missing |
 | `unknown` | the probe could not run or could not answer, never a claim that the key is absent |
+
+A stored sign-in grant (the `llm-pi-ai` record) outranks ambient variables, so a
+route signed in through the browser reads `configured` even with its key
+variables unset. `configured` means a credential is present, not that it was
+validated by a call.
 
 The `note` "no credential; the adapter advertises nothing" is only attached
 when the adapter was actually asked and answered with an empty catalog.

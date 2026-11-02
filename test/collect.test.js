@@ -47,6 +47,7 @@ function host(overrides = {}) {
     },
     credentials: {
       describe: async (ref) => ({ configured: ref === 'ALPHA_KEY', writable: true }),
+      describeRecord: async () => ({ configured: false, writable: true }),
     },
     agentDefaultModel: { currentSelection: () => ({ provider: 'alpha', model: 'alpha-large' }) },
     ...overrides,
@@ -363,10 +364,28 @@ test('one call budget covers both phases, so a hang cannot double the time', asy
     {
       get: (name) =>
         name === 'credentials'
-          ? { describe: () => new Promise(() => {}) }
+          ? {
+              describe: () => new Promise(() => {}),
+              describeRecord: async () => ({ configured: false, writable: true }),
+            }
           : name === 'llm'
-            ? { ...base.get('llm'), listModels: async () => [] }
-            : base.get(name),
+            ? {
+                ...base.get('llm'),
+                listModels: async () => [],
+                // the dormant row must hang as well, or a per-phase budget passes
+                listConfigurableProviders: () => [
+                  {
+                    provider: 'delta',
+                    displayName: 'Delta',
+                    settingsNs: 'llm-delta',
+                    settingsPath: ['profile'],
+                    nativeAuth: { env: ['DELTA_KEY'], oauth: false },
+                  },
+                ],
+              }
+            : name === 'settings'
+              ? { describe: () => [{ ns: 'llm-delta', value: {} }] }
+              : base.get(name),
     },
     { timeoutMs: 40 },
   );
@@ -402,25 +421,27 @@ test('a context without the llm service fails loudly', async () => {
   await assert.rejects(() => collectModels({ get: () => undefined }), /llm service is not mounted/);
 });
 
-test('credentialState answers unknown for an undeclared route and not-applicable for unused auth', async () => {
+test('credentialState answers unknown for an undeclared route and missing for an unsigned OAuth route', async () => {
   const ctx = host();
   const namespaces = ctx.get('settings').describe();
-  assert.equal(await credentialState(ctx, 'beta', undefined, namespaces), CREDENTIALS.UNKNOWN);
+  assert.equal((await credentialState(ctx, 'beta', undefined, namespaces)).state, CREDENTIALS.UNKNOWN);
   assert.equal(
-    await credentialState(ctx, 'gamma', { settingsNs: 'llm-gamma', settingsPath: ['profile'] }, namespaces),
+    (await credentialState(ctx, 'gamma', { settingsNs: 'llm-gamma', settingsPath: ['profile'] }, namespaces)).state,
     CREDENTIALS.NOT_APPLICABLE,
   );
   assert.equal(
-    await credentialState(
-      ctx,
-      'oauth',
-      { provider: 'oauth', settingsNs: 'llm-gamma', settingsPath: ['profile'], nativeAuth: { env: [], oauth: true } },
-      namespaces,
-    ),
-    CREDENTIALS.NOT_APPLICABLE,
+    (
+      await credentialState(
+        ctx,
+        'oauth',
+        { provider: 'oauth', settingsNs: 'llm-gamma', settingsPath: ['profile'], nativeAuth: { env: [], oauth: true } },
+        namespaces,
+      )
+    ).state,
+    CREDENTIALS.MISSING,
   );
   assert.equal(
-    await credentialState(ctx, 'alpha', { settingsNs: 'llm-alpha', settingsPath: ['profile'] }, undefined),
+    (await credentialState(ctx, 'alpha', { settingsNs: 'llm-alpha', settingsPath: ['profile'] }, undefined)).state,
     CREDENTIALS.UNKNOWN,
   );
 });
@@ -583,4 +604,178 @@ test('a malformed registry entry does not sink the call', async () => {
     value.providers.map((row) => row.provider),
     ['alpha', 'gamma'],
   );
+});
+
+test('a stored sign-in record marks the route configured despite unset variables', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'beta', name: 'Beta' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'beta',
+                displayName: 'Beta',
+                settingsNs: 'llm-beta',
+                settingsPath: ['profile'],
+                nativeAuth: { env: ['BETA_KEY'], oauth: true },
+              },
+            ],
+            listModels: async () => [{ id: 'beta-one' }],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-beta', value: {} }] }
+          : name === 'credentials'
+            ? {
+                describe: async () => ({ configured: false, writable: true }),
+                describeRecord: async () => ({ configured: true, kind: 'oauth', writable: true }),
+              }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.CONFIGURED);
+  assert.equal(value.providers[0].error, undefined);
+});
+
+test('a rejecting credential store is reported next to a failed catalog', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'credentials'
+        ? {
+            describe: async () => {
+              throw new Error('store down');
+            },
+            describeRecord: async () => {
+              throw new Error('store down');
+            },
+          }
+        : name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listProviders: () => [{ id: 'beta', name: 'Beta' }],
+              listConfigurableProviders: () => [
+                {
+                  provider: 'beta',
+                  displayName: 'Beta',
+                  settingsNs: 'llm-beta',
+                  settingsPath: ['profile'],
+                  nativeAuth: { env: ['BETA_KEY'], oauth: true },
+                },
+              ],
+              listModels: async () => {
+                throw new Error('catalog boom');
+              },
+            }
+          : base.get(name),
+  });
+  const row = value.providers[0];
+  assert.equal(row.credential, CREDENTIALS.UNKNOWN);
+  assert.match(row.error, /catalog: catalog boom/);
+  assert.match(row.error, /credential: store down/);
+  assert.equal(value.counts.failures, 1);
+});
+
+test('one unknown env reference outranks a missing sibling', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'beta', name: 'Beta' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'beta',
+                displayName: 'Beta',
+                settingsNs: 'llm-beta',
+                settingsPath: ['profile'],
+                nativeAuth: { env: ['BETA_KEY', 'BETA_ALT'], oauth: false },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-beta', value: {} }] }
+          : name === 'credentials'
+            ? {
+                describe: async (ref) => (ref === 'BETA_ALT' ? undefined : { configured: false, writable: true }),
+                describeRecord: async () => ({ configured: false, writable: true }),
+              }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.UNKNOWN);
+});
+
+test('a dormant row is aborted without touching the store', async () => {
+  let calls = 0;
+  const controller = new AbortController();
+  controller.abort();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              listProviders: () => [],
+              listConfigurableProviders: () => [
+                { provider: 'gamma', displayName: 'Gamma', settingsNs: 'llm-gamma', settingsPath: ['profile'] },
+              ],
+              listModels: async () => [],
+            }
+          : name === 'settings'
+            ? { describe: () => [{ ns: 'llm-gamma', value: {} }] }
+            : name === 'credentials'
+              ? {
+                  describe: async () => {
+                    calls += 1;
+                    return { configured: false, writable: true };
+                  },
+                  describeRecord: async () => ({ configured: false, writable: true }),
+                }
+              : undefined,
+    },
+    { signal: controller.signal },
+  );
+  assert.equal(calls, 0);
+  assert.equal(value.providers[0].error, 'credential: aborted before the probe');
+});
+
+test('settings.describe runs once per call', async () => {
+  let calls = 0;
+  const base = host();
+  await collectModels({
+    get: (name) =>
+      name === 'settings'
+        ? {
+            describe: () => {
+              calls += 1;
+              return base.get('settings').describe();
+            },
+          }
+        : base.get(name),
+  });
+  assert.equal(calls, 1);
+});
+
+test('the default reasoning effort and a trimmed filter survive', async () => {
+  const base = host();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'agentDefaultModel'
+          ? { currentSelection: () => ({ provider: 'alpha', model: 'alpha-large', reasoningEffort: 'high' }) }
+          : base.get(name),
+    },
+    { provider: '  alpha  ' },
+  );
+  assert.deepEqual(value.default, { provider: 'alpha', model: 'alpha-large', reasoningEffort: 'high' });
+});
+
+test('the provider filter also applies to dormant rows', async () => {
+  const value = await collectModels(host(), { provider: 'zeta' });
+  assert.deepEqual(
+    value.providers.map((row) => row.provider),
+    ['zeta'],
+  );
+  assert.equal(value.providers[0].credential, CREDENTIALS.UNKNOWN);
 });

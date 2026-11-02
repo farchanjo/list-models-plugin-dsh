@@ -7,6 +7,7 @@ import { test } from 'node:test';
 
 import { assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools';
 
+import { DEFAULT_PROBE_TIMEOUT_MS } from '../lib/collect.js';
 import { apply } from '../lib/index.js';
 
 /**
@@ -142,4 +143,19 @@ test('presentCall names the filter and presentResult titles the counts', async (
   assert.match(view.title, /^1 active, 0 dormant, 1 models$/);
   const failed = tool.presentResult({}, { content: [], isError: true, meta });
   assert.match(failed.title, /\(failed\)$/);
+});
+
+test('the tool budget leaves headroom over the internal call budget', () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  assert.ok(definition().timeoutMs > DEFAULT_PROBE_TIMEOUT_MS);
+});
+
+test('the caller signal reaches the collector', async () => {
+  const { ctx, definition } = host();
+  apply(ctx);
+  const controller = new AbortController();
+  controller.abort();
+  const value = await definition().execute({}, { signal: controller.signal });
+  assert.ok(value.providers.every((row) => /aborted/.test(row.error)));
 });
