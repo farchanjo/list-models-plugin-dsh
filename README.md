@@ -92,7 +92,7 @@ presenters receive a compact projection — `generatedAt`, `default`, `counts`,
 | --- | --- |
 | `configured` | the route declares an API-key reference and that reference is set |
 | `missing` | the route declares an API-key reference and that reference is unset |
-| `not-applicable` | nothing to be missing: the adapter authenticates natively without a key (`nativeAuth.oauth`), or declares no environment reference either |
+| `not-applicable` | nothing to be missing: the route declares no environment reference and either authenticates natively through OAuth or uses no key at all |
 | `unknown` | the probe could not run or could not answer, never a claim that the key is absent |
 
 The `note` "no credential; the adapter advertises nothing" is only attached
