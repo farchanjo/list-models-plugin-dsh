@@ -1,0 +1,49 @@
+{
+  "name": "list-models-plugin-dsh",
+  "version": "0.1.0",
+  "description": "Read-only model inventory for DSH: lists registered provider routes, dormant configurable routes, and credential state without touching core.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "models",
+    "llm",
+    "inventory",
+    "cordis"
+  ],
+  "author": "Fabricio Archanjo <farchanjo@gmail.com>",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./collect": "./lib/collect.js"
+  },
+  "files": [
+    "lib",
+    "dsh-plugin.json",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "biome.json"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\"",
+    "lint": "biome check lib test",
+    "lint:fix": "biome check --write lib test"
+  },
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-credentials": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.4"
+  }
+}

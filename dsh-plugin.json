@@ -1,0 +1,34 @@
+{
+  "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
+  "id": "list-models-plugin-dsh",
+  "name": "list-models-plugin-dsh",
+  "version": "0.1.0",
+  "manifestVersion": "0.15",
+  "description": "Read-only model inventory for DSH: registered provider routes, dormant declared routes, and credential state, exposed as one tool.",
+  "facets": {
+    "host": {
+      "entry": "lib/index.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": [
+      {
+        "apiVersion": "tools.dsh/v1alpha1",
+        "kind": "Tool"
+      }
+    ]
+  },
+  "permissions": [],
+  "contributes": {
+    "tools": [
+      {
+        "id": "list_models",
+        "title": "List models",
+        "description": "Lists the models registered in this DSH instance, read-only: active provider routes, dormant declared routes, credential state, and the advertised catalog. Marks the default selection."
+      }
+    ]
+  },
+  "subscriptions": [],
+  "license": "MIT"
+}

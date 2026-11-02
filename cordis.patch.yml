@@ -1,0 +1,7 @@
+# Bundle patch: insert the plugin as a profile row.
+#
+# The row carries no config. The inventory reads the live registry at call
+# time, so there is nothing to seed here; every source degrades on its own.
+- insert:
+    - id: list-models-plugin-dsh
+      name: 'list-models-plugin-dsh'
