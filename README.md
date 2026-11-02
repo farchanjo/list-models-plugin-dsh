@@ -7,7 +7,8 @@ instance actually has registered, and nothing else.
 
 - every **active** provider route, with the models its adapter advertises;
 - every **dormant** route a plugin declared but nobody activated;
-- the **credential state** of each route: `configured`, `missing`, or `unknown`.
+- the **credential state** of each route: `configured`, `missing`,
+  `not-applicable`, or `unknown`.
 
 The default provider and model are marked. No file of DSH, of `dsh-tui`, of the
 web app, or of any other plugin is touched: the plugin only reads the public
@@ -32,10 +33,11 @@ vanish from the answer. The inventory therefore joins two registry halves:
 One provider never sinks the answer. A throwing adapter, a rejected key
 lookup, or an unmounted `settings`/`credentials` service degrades that row —
 `error`, `unknown`, or an empty catalog — and the rest of the inventory still
-reports. The tool also stops at 500 models per provider and 200 providers, and
-flags truncation.
+reports. Rows are built concurrently, each probe runs under a 5 s deadline, and
+the caller's abort signal cuts them short. The tool also stops at 500 models
+per provider and 200 providers, and flags truncation.
 
-Nothing here resolves a model call or writes settings, so a listing is cheap.
+Nothing here resolves a model call or writes settings.
 
 ## Install
 
@@ -49,12 +51,13 @@ The bundle patch inserts the row; no manual profile edit is needed.
 
 | Argument | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `provider` | string | all | exact provider id to report |
+| `provider` | string | all | exact provider id to report, at most 128 characters |
 | `includeDormant` | boolean | `true` | include declared-but-inactive routes |
 | `probeModels` | boolean | `true` | ask adapters for their catalog; `false` answers from the registry alone |
 
-The canonical value is JSON; the model sees a readable table, and the same
-value is what `presentResult` consumers receive.
+The canonical value is JSON and the model sees a readable table. Host
+presenters receive a compact projection — `generatedAt`, `default`, `counts`,
+`truncated` — through the tool's `presentationMeta`, not the full row list.
 
 ```json
 {
@@ -72,7 +75,7 @@ value is what `presentResult` consumers receive.
       "provider": "dsv41",
       "name": "DeepSeek Flash 41",
       "kind": "dormant",
-      "credential": "missing",
+      "credential": "not-applicable",
       "note": "declared, not activated; it has no adapter and no models",
       "models": []
     }
@@ -83,9 +86,17 @@ value is what `presentResult` consumers receive.
 }
 ```
 
-`kind` is `active` or `dormant`. `credential` is `configured`, `missing`, or
-`unknown`; `unknown` means the credential could not be probed, never that it is
-absent.
+`kind` is `active` or `dormant`. `credential` is one of:
+
+| Value | Means |
+| --- | --- |
+| `configured` | the route declares an API-key reference and that reference is set |
+| `missing` | the route declares an API-key reference and that reference is unset |
+| `not-applicable` | nothing to be missing: the adapter authenticates natively without a key (`nativeAuth.oauth`), or declares no environment reference either |
+| `unknown` | the probe could not run or could not answer, never a claim that the key is absent |
+
+The `note` "no credential; the adapter advertises nothing" is only attached
+when the adapter was actually asked and answered with an empty catalog.
 
 ## Layout
 

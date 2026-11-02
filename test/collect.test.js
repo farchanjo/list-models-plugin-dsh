@@ -1,11 +1,18 @@
 /**
  * Collector contract: both registry halves are reported, one broken provider
- * never sinks the answer, and a missing service degrades instead of throwing.
+ * never sinks the answer, a hang is bounded, and a missing service degrades.
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { CREDENTIALS, collectModels, credentialState, KINDS } from '../lib/collect.js';
+import {
+  CREDENTIALS,
+  collectModels,
+  credentialState,
+  KINDS,
+  MAX_MODELS_PER_PROVIDER,
+  MAX_PROVIDERS,
+} from '../lib/collect.js';
 
 /**
  * Build a host context over a fake registry.
@@ -16,14 +23,15 @@ function host(overrides = {}) {
   const services = {
     llm: {
       listProviders: () => [
+        { id: 'zeta', name: 'Zeta' },
         { id: 'alpha', name: 'Alpha' },
         { id: 'beta', name: 'Beta' },
       ],
       listModels: async (provider) => {
         if (provider === 'beta') throw new Error('catalog unavailable');
         return [
-          { provider, id: 'alpha-large', name: 'Alpha Large', inputModalities: ['text', 'image'] },
-          { provider, id: 'alpha-small', name: 'Alpha Small' },
+          { provider, id: `${provider}-large`, name: 'Large', inputModalities: ['text', 'image'] },
+          { provider, id: `${provider}-small`, name: 'Small' },
         ];
       },
       listConfigurableProviders: () => [
@@ -46,14 +54,15 @@ function host(overrides = {}) {
   return { get: (name) => services[name] };
 }
 
-test('reports active and dormant routes with credential state', async () => {
+test('reports active and dormant routes, sorted, with credential state', async () => {
   const value = await collectModels(host());
   assert.deepEqual(
     value.providers.map((row) => [row.provider, row.kind, row.credential]),
     [
       ['alpha', KINDS.ACTIVE, CREDENTIALS.CONFIGURED],
       ['beta', KINDS.ACTIVE, CREDENTIALS.UNKNOWN],
-      ['gamma', KINDS.DORMANT, CREDENTIALS.UNKNOWN],
+      ['zeta', KINDS.ACTIVE, CREDENTIALS.UNKNOWN],
+      ['gamma', KINDS.DORMANT, CREDENTIALS.NOT_APPLICABLE],
     ],
   );
   assert.deepEqual(value.default, { provider: 'alpha', model: 'alpha-large' });
@@ -61,40 +70,129 @@ test('reports active and dormant routes with credential state', async () => {
     value.providers[0].models.map((model) => model.id),
     ['alpha-large', 'alpha-small'],
   );
+  assert.deepEqual(value.providers[0].models[0].inputModalities, ['text', 'image']);
 });
 
 test('one throwing adapter degrades its own row only', async () => {
   const value = await collectModels(host());
   const beta = value.providers.find((row) => row.provider === 'beta');
-  assert.equal(beta.error, 'catalog unavailable');
+  assert.equal(beta.error, 'catalog: catalog unavailable');
   assert.deepEqual(beta.models, []);
-  assert.deepEqual(value.failures, [{ provider: 'beta', message: 'catalog unavailable' }]);
+  assert.deepEqual(value.failures, [{ provider: 'beta', message: 'catalog: catalog unavailable' }]);
   assert.equal(value.counts.failures, 1);
   assert.equal(value.providers[0].error, undefined);
 });
 
-test('a missing credential marks the row and notes the empty catalog', async () => {
-  const value = await collectModels(host(), { probeModels: false });
-  const alpha = value.providers.find((row) => row.provider === 'alpha');
-  assert.equal(alpha.credential, CREDENTIALS.CONFIGURED);
+test('a hanging adapter is bounded by the deadline', async () => {
   const base = host();
-  const missing = await collectModels({
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'llm' ? { ...base.get('llm'), listModels: () => new Promise(() => {}) } : base.get(name),
+    },
+    { timeoutMs: 25 },
+  );
+  assert.equal(value.providers.length, 4);
+  assert.match(value.providers[0].error, /catalog: timed out after 25 ms/);
+  assert.equal(value.counts.failures, 3);
+});
+
+test('probes run concurrently, not in series', async () => {
+  const base = host();
+  const started = Date.now();
+  await collectModels(
+    {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listModels: () => new Promise((resolve) => setTimeout(() => resolve([]), 60)),
+            }
+          : base.get(name),
+    },
+    { includeDormant: false },
+  );
+  assert.ok(Date.now() - started < 150, 'three 60 ms probes should overlap');
+});
+
+test('an aborted signal fails the probes instead of waiting', async () => {
+  const base = host();
+  const controller = new AbortController();
+  controller.abort();
+  const value = await collectModels(
+    { get: (name) => (name === 'llm' ? base.get('llm') : base.get(name)) },
+    { signal: controller.signal },
+  );
+  assert.ok(
+    value.providers.filter((row) => row.kind === KINDS.ACTIVE).every((row) => row.error === 'aborted before the probe'),
+  );
+});
+
+test('a missing credential marks the row and notes the empty catalog only when probed', async () => {
+  const base = host();
+  const missingHost = {
     get: (name) =>
       name === 'credentials'
         ? { describe: async () => ({ configured: false, writable: true }) }
         : name === 'llm'
           ? { ...base.get('llm'), listModels: async () => [] }
           : base.get(name),
-  });
+  };
+  const missing = await collectModels(missingHost);
   const row = missing.providers.find((entry) => entry.provider === 'alpha');
   assert.equal(row.credential, CREDENTIALS.MISSING);
   assert.equal(row.note, 'no credential; the adapter advertises nothing');
-  assert.equal(missing.providers.find((entry) => entry.provider === 'beta').note, undefined);
+
+  const unprobed = await collectModels(missingHost, { probeModels: false });
+  const unprobedRow = unprobed.providers.find((entry) => entry.provider === 'alpha');
+  assert.equal(unprobedRow.credential, CREDENTIALS.MISSING);
+  assert.equal(unprobedRow.note, undefined, 'the adapter was never asked');
+
+  const failing = await collectModels({
+    get: (name) =>
+      name === 'credentials'
+        ? { describe: async () => ({ configured: false, writable: true }) }
+        : name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listConfigurableProviders: () => [
+                { provider: 'beta', displayName: 'Beta', settingsNs: 'llm-beta', settingsPath: ['profile'] },
+              ],
+            }
+          : name === 'settings'
+            ? { describe: () => [{ ns: 'llm-beta', value: { profile: { apiKeyEnv: 'BETA_KEY' } } }] }
+            : base.get(name),
+  });
+  const failingRow = failing.providers.find((entry) => entry.provider === 'beta');
+  assert.equal(failingRow.credential, CREDENTIALS.MISSING);
+  assert.equal(failingRow.error, 'catalog: catalog unavailable');
+  assert.equal(failingRow.note, undefined, 'an error is not an empty catalog');
 });
 
 test('unknown services degrade to unknown instead of throwing', async () => {
   const value = await collectModels(host({ settings: undefined, credentials: undefined }));
-  assert.ok(value.providers.every((row) => row.credential === CREDENTIALS.UNKNOWN));
+  const declared = value.providers.filter((row) => row.provider === 'alpha' || row.provider === 'gamma');
+  assert.equal(declared.length, 2);
+  assert.ok(declared.every((row) => row.credential === CREDENTIALS.UNKNOWN));
+  const undeclared = value.providers.filter((row) => row.provider === 'beta' || row.provider === 'zeta');
+  assert.ok(undeclared.every((row) => row.credential === CREDENTIALS.UNKNOWN));
+});
+
+test('a malformed credential answer is unknown, not missing', async () => {
+  const value = await collectModels(host({ credentials: { describe: async () => undefined } }));
+  const alpha = value.providers.find((row) => row.provider === 'alpha');
+  assert.equal(alpha.credential, CREDENTIALS.UNKNOWN);
+});
+
+test('an OAuth route with no key reference is not-applicable', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? { ...base.get('llm'), listProviders: () => [{ id: 'deepseek-account', name: 'DeepSeek Account' }] }
+        : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.NOT_APPLICABLE);
 });
 
 test('filters to one provider and can exclude dormant routes', async () => {
@@ -106,35 +204,278 @@ test('filters to one provider and can exclude dormant routes', async () => {
   const activeOnly = await collectModels(host(), { includeDormant: false });
   assert.deepEqual(
     activeOnly.providers.map((row) => row.provider),
-    ['alpha', 'beta'],
+    ['alpha', 'beta', 'zeta'],
   );
 });
 
 test('probeModels false never calls the adapter', async () => {
   let calls = 0;
+  const base = host();
   const value = await collectModels(
-    host({
-      llm: {
-        ...host().get('llm'),
-        listModels: async () => {
-          calls += 1;
-          return [];
-        },
-      },
-    }),
+    {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listModels: async () => {
+                calls += 1;
+                return [];
+              },
+            }
+          : base.get(name),
+    },
     { probeModels: false },
   );
   assert.equal(calls, 0);
   assert.equal(value.counts.models, 0);
 });
 
+test('the model cap truncates one provider and flags that row', async () => {
+  const base = host();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listModels: async () =>
+                Array.from({ length: MAX_MODELS_PER_PROVIDER + 7 }, (_unused, index) => ({ id: `m${index}` })),
+            }
+          : base.get(name),
+    },
+    { includeDormant: false },
+  );
+  assert.equal(value.providers[0].models.length, MAX_MODELS_PER_PROVIDER);
+  assert.equal(value.providers[0].truncated, true);
+  assert.equal(value.truncated, false);
+});
+
+test('the provider cap truncates the call and flags it', async () => {
+  const base = host();
+  const many = Array.from({ length: MAX_PROVIDERS + 10 }, (_unused, index) => ({
+    id: `p${String(index).padStart(3, '0')}`,
+    name: `P${index}`,
+  }));
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'llm' ? { ...base.get('llm'), listProviders: () => many, listModels: async () => [] } : base.get(name),
+    },
+    { includeDormant: false },
+  );
+  assert.equal(value.providers.length, MAX_PROVIDERS);
+  assert.equal(value.truncated, true);
+});
+
+test('a non-Error throw is reported without crashing the call', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listModels: (provider) => {
+              if (provider === 'beta') throw Object.create(null);
+              return Promise.resolve([]);
+            },
+          }
+        : base.get(name),
+  });
+  const beta = value.providers.find((row) => row.provider === 'beta');
+  assert.equal(beta.error, 'catalog: [object Object]');
+});
+
+test('non-array registry answers are treated as empty', async () => {
+  const value = await collectModels({
+    get: (name) => (name === 'llm' ? { listProviders: () => null, listConfigurableProviders: () => 7 } : undefined),
+  });
+  assert.deepEqual(value.providers, []);
+  assert.equal(value.counts.providers, 0);
+});
+
 test('a context without the llm service fails loudly', async () => {
   await assert.rejects(() => collectModels({ get: () => undefined }), /llm service is not mounted/);
 });
 
-test('credentialState answers unknown for a missing entry or a non-object profile', async () => {
+test('credentialState answers unknown for an undeclared route and not-applicable for unused auth', async () => {
   const ctx = host();
-  assert.equal(await credentialState(ctx, undefined), CREDENTIALS.UNKNOWN);
-  assert.equal(await credentialState(ctx, { settingsNs: 'absent', settingsPath: ['profile'] }), CREDENTIALS.UNKNOWN);
-  assert.equal(await credentialState(ctx, { settingsNs: 'llm-gamma', settingsPath: ['profile'] }), CREDENTIALS.UNKNOWN);
+  const namespaces = ctx.get('settings').describe();
+  assert.equal(await credentialState(ctx, 'beta', undefined, namespaces), CREDENTIALS.UNKNOWN);
+  assert.equal(
+    await credentialState(ctx, 'gamma', { settingsNs: 'llm-gamma', settingsPath: ['profile'] }, namespaces),
+    CREDENTIALS.NOT_APPLICABLE,
+  );
+  assert.equal(
+    await credentialState(
+      ctx,
+      'oauth',
+      { provider: 'oauth', settingsNs: 'llm-gamma', settingsPath: ['profile'], nativeAuth: { env: [], oauth: true } },
+      namespaces,
+    ),
+    CREDENTIALS.NOT_APPLICABLE,
+  );
+  assert.equal(
+    await credentialState(ctx, 'alpha', { settingsNs: 'llm-alpha', settingsPath: ['profile'] }, undefined),
+    CREDENTIALS.UNKNOWN,
+  );
+});
+
+test('a hanging credential lookup still returns the healthy catalog', async () => {
+  const base = host();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'credentials'
+          ? { describe: () => new Promise(() => {}) }
+          : name === 'llm'
+            ? { ...base.get('llm'), listModels: async (provider) => [{ id: `${provider}-one` }] }
+            : base.get(name),
+    },
+    { includeDormant: false, timeoutMs: 25 },
+  );
+  const alpha = value.providers.find((row) => row.provider === 'alpha');
+  assert.equal(alpha.credential, CREDENTIALS.UNKNOWN);
+  assert.match(alpha.error, /^credential: timed out after \d+ ms$/);
+  assert.deepEqual(
+    alpha.models.map((model) => model.id),
+    ['alpha-one'],
+  );
+});
+
+test('a hanging credential lookup settles a dormant row too', async () => {
+  const base = host();
+  const value = await collectModels(
+    {
+      get: (name) =>
+        name === 'credentials'
+          ? { describe: () => new Promise(() => {}) }
+          : name === 'llm'
+            ? {
+                ...base.get('llm'),
+                listProviders: () => [],
+                listConfigurableProviders: () => [
+                  {
+                    provider: 'gamma',
+                    displayName: 'Gamma',
+                    settingsNs: 'llm-gamma',
+                    settingsPath: ['profile'],
+                    nativeAuth: { env: ['GAMMA_KEY'], oauth: false },
+                  },
+                ],
+              }
+            : name === 'settings'
+              ? { describe: () => [{ ns: 'llm-gamma', value: { profile: {} } }] }
+              : base.get(name),
+    },
+    { timeoutMs: 25 },
+  );
+  assert.equal(value.providers[0].credential, CREDENTIALS.UNKNOWN);
+  assert.match(value.providers[0].error, /timed out/);
+});
+
+test('an abort after the probes start fails them and releases the listeners', async () => {
+  const base = host();
+  const controller = new AbortController();
+  let listeners = 0;
+  const { signal } = controller;
+  const add = signal.addEventListener.bind(signal);
+  const remove = signal.removeEventListener.bind(signal);
+  signal.addEventListener = (...args) => {
+    listeners += 1;
+    add(...args);
+  };
+  signal.removeEventListener = (...args) => {
+    listeners -= 1;
+    remove(...args);
+  };
+  const pending = collectModels(
+    {
+      get: (name) =>
+        name === 'llm'
+          ? { ...base.get('llm'), listModels: () => new Promise(() => {}), listConfigurableProviders: () => [] }
+          : name === 'credentials'
+            ? { describe: () => new Promise(() => {}) }
+            : base.get(name),
+    },
+    { signal, timeoutMs: 5_000 },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  controller.abort();
+  const value = await pending;
+  assert.ok(value.providers.every((row) => row.error === 'credential: aborted' || /aborted/.test(row.error)));
+  assert.equal(listeners, 0);
+});
+
+test('native auth env references drive the state when the profile declares none', async () => {
+  const base = host();
+  const entry = (env) => ({
+    provider: 'beta',
+    displayName: 'Beta',
+    settingsNs: 'llm-beta',
+    settingsPath: ['profile'],
+    nativeAuth: { env, oauth: false },
+  });
+  const run = (apiKeyConfigured) =>
+    collectModels({
+      get: (name) =>
+        name === 'llm'
+          ? {
+              ...base.get('llm'),
+              listProviders: () => [{ id: 'beta', name: 'Beta' }],
+              listConfigurableProviders: () => [entry(['BETA_KEY', 'BETA_KEY_ALT'])],
+            }
+          : name === 'settings'
+            ? { describe: () => [{ ns: 'llm-beta', value: { profile: {} } }] }
+            : name === 'credentials'
+              ? { describe: async (ref) => ({ configured: apiKeyConfigured.includes(ref), writable: true }) }
+              : base.get(name),
+    });
+  assert.equal((await run([])).providers[0].credential, CREDENTIALS.MISSING);
+  assert.equal((await run(['BETA_KEY_ALT'])).providers[0].credential, CREDENTIALS.CONFIGURED);
+});
+
+test('the provider cap can drop dormant rows and still flags it', async () => {
+  const base = host();
+  const manyActive = Array.from({ length: MAX_PROVIDERS - 1 }, (_unused, index) => ({
+    id: `p${String(index).padStart(3, '0')}`,
+    name: `P${index}`,
+  }));
+  const manyDormant = Array.from({ length: 5 }, (_unused, index) => ({
+    provider: `d${index}`,
+    displayName: `D${index}`,
+    settingsNs: 'llm-gamma',
+    settingsPath: ['profile'],
+  }));
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => manyActive,
+            listConfigurableProviders: () => manyDormant,
+            listModels: async () => [],
+          }
+        : base.get(name),
+  });
+  assert.equal(value.providers.length, MAX_PROVIDERS);
+  assert.equal(value.counts.dormant, 1);
+  assert.equal(value.truncated, true);
+});
+
+test('a malformed registry entry does not sink the call', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'alpha', name: 'Alpha' }, null, { name: 'NoId' }],
+            listConfigurableProviders: () => [null, { provider: 'gamma', displayName: 'Gamma' }],
+          }
+        : base.get(name),
+  });
+  assert.deepEqual(
+    value.providers.map((row) => row.provider),
+    ['alpha', 'gamma'],
+  );
 });
