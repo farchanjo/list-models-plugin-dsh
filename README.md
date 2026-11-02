@@ -26,7 +26,7 @@ vanish from the answer. The inventory therefore joins two registry halves:
 | `llm.listModels(provider)` | the catalog one active adapter advertises |
 | `llm.listConfigurableProviders()` | routes declared and not activated |
 | `settings.describe()` + `credentials.describe()` | credential state per route |
-| `credentials.describeRecord()` | a stored sign-in or API-key grant |
+| `credentials.describeRecord()` | a stored sign-in or API-key record |
 | `agentDefaultModel.currentSelection()` | the default route to mark |
 
 ## Isolation

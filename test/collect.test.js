@@ -373,8 +373,15 @@ test('one call budget covers both phases, so a hang cannot double the time', asy
             ? {
                 ...base.get('llm'),
                 listModels: async () => [],
-                // the dormant row must hang as well, or a per-phase budget passes
+                // both phases must wait, or a per-phase budget passes
                 listConfigurableProviders: () => [
+                  {
+                    provider: 'alpha',
+                    displayName: 'Alpha',
+                    settingsNs: 'llm-alpha',
+                    settingsPath: ['profile'],
+                    nativeAuth: { env: ['ALPHA_KEY'], oauth: false },
+                  },
                   {
                     provider: 'delta',
                     displayName: 'Delta',
@@ -768,6 +775,13 @@ test('a late dormant row names the call budget, not the leftover', async () => {
                 listModels: async () => [],
                 listConfigurableProviders: () => [
                   {
+                    provider: 'alpha',
+                    displayName: 'Alpha',
+                    settingsNs: 'llm-alpha',
+                    settingsPath: ['profile'],
+                    nativeAuth: { env: ['ALPHA_KEY'], oauth: false },
+                  },
+                  {
                     provider: 'delta',
                     displayName: 'Delta',
                     settingsNs: 'llm-delta',
@@ -844,10 +858,10 @@ test('the collector does not trim the filter itself', async () => {
   assert.deepEqual(value.providers, []);
 });
 
-test('safeMessage survives a null-prototype throw, a non-string message, and a throwing toString', () => {
+test('safeMessage always yields a string', () => {
   assert.equal(safeMessage(Object.create(null)), '[object Object]');
   assert.equal(safeMessage({ toString: () => 'plain object' }), 'plain object');
-  assert.equal(safeMessage({ toString: () => undefined }), 'plain object'.replace('plain object', 'undefined'));
+  assert.equal(safeMessage({ toString: () => undefined }), 'undefined');
   const error = new Error('x');
   Object.assign(error, { message: 42 });
   assert.equal(safeMessage(error), '42');
@@ -887,6 +901,39 @@ test('the sign-in record is read under the fixed adapter scope', async () => {
   assert.deepEqual(keys, ['llm-pi-ai/alpha']);
 });
 
+test('a failed record read is reported even when a variable answers', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'beta', name: 'Beta' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'beta',
+                displayName: 'Beta',
+                settingsNs: 'llm-pi-ai',
+                settingsPath: ['providers', 'beta'],
+                nativeAuth: { env: ['BETA_KEY'], oauth: true },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-pi-ai', value: { providers: { beta: {} } } }] }
+          : name === 'credentials'
+            ? {
+                describe: async () => ({ configured: true, writable: true }),
+                describeRecord: async () => {
+                  throw new Error('record store down');
+                },
+              }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.CONFIGURED);
+  assert.match(value.providers[0].error, /credential: record store down/);
+});
+
 test('a provider id outside the key grammar falls back to the variables', async () => {
   const base = host();
   const value = await collectModels({
@@ -908,7 +955,12 @@ test('a provider id outside the key grammar falls back to the variables', async 
         : name === 'settings'
           ? { describe: () => [{ ns: 'llm-pi-ai', value: { providers: { Bad_ID: {} } } }] }
           : name === 'credentials'
-            ? { describe: async () => ({ configured: false, writable: true }) }
+            ? {
+                describe: async () => ({ configured: false, writable: true }),
+                describeRecord: async () => {
+                  throw new TypeError('credential key segment "Bad_ID" must match the grammar');
+                },
+              }
             : base.get(name),
   });
   assert.equal(value.providers[0].credential, CREDENTIALS.MISSING);
