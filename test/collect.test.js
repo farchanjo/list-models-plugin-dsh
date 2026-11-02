@@ -12,6 +12,7 @@ import {
   KINDS,
   MAX_MODELS_PER_PROVIDER,
   MAX_PROVIDERS,
+  safeMessage,
 } from '../lib/collect.js';
 
 /**
@@ -827,18 +828,91 @@ test('settings.describe runs once per call', async () => {
   assert.equal(calls, 1);
 });
 
-test('the default reasoning effort and a trimmed filter survive', async () => {
+test('the default reasoning effort is reported', async () => {
   const base = host();
-  const value = await collectModels(
-    {
-      get: (name) =>
-        name === 'agentDefaultModel'
-          ? { currentSelection: () => ({ provider: 'alpha', model: 'alpha-large', reasoningEffort: 'high' }) }
-          : base.get(name),
-    },
-    { provider: '  alpha  ' },
-  );
+  const value = await collectModels({
+    get: (name) =>
+      name === 'agentDefaultModel'
+        ? { currentSelection: () => ({ provider: 'alpha', model: 'alpha-large', reasoningEffort: 'high' }) }
+        : base.get(name),
+  });
   assert.deepEqual(value.default, { provider: 'alpha', model: 'alpha-large', reasoningEffort: 'high' });
+});
+
+test('the collector does not trim the filter itself', async () => {
+  const value = await collectModels(host(), { provider: '  alpha  ' });
+  assert.deepEqual(value.providers, []);
+});
+
+test('safeMessage survives a null-prototype throw, a non-string message, and a throwing toString', () => {
+  assert.equal(safeMessage(Object.create(null)), '[object Object]');
+  assert.equal(safeMessage({ toString: () => 'plain object' }), 'plain object');
+  assert.equal(safeMessage({ toString: () => undefined }), 'plain object'.replace('plain object', 'undefined'));
+  const error = new Error('x');
+  Object.assign(error, { message: 42 });
+  assert.equal(safeMessage(error), '42');
+});
+
+test('the sign-in record is read under the fixed adapter scope', async () => {
+  const base = host();
+  const keys = [];
+  await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'alpha', name: 'Alpha' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'alpha',
+                displayName: 'Alpha',
+                settingsNs: 'llm-something-else',
+                settingsPath: ['profile'],
+                nativeAuth: { env: [], oauth: true },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-something-else', value: {} }] }
+          : name === 'credentials'
+            ? {
+                describe: async () => ({ configured: false, writable: true }),
+                describeRecord: async (key) => {
+                  keys.push(key);
+                  return { configured: false, writable: true };
+                },
+              }
+            : base.get(name),
+  });
+  assert.deepEqual(keys, ['llm-pi-ai/alpha']);
+});
+
+test('a provider id outside the key grammar falls back to the variables', async () => {
+  const base = host();
+  const value = await collectModels({
+    get: (name) =>
+      name === 'llm'
+        ? {
+            ...base.get('llm'),
+            listProviders: () => [{ id: 'Bad_ID', name: 'Bad' }],
+            listConfigurableProviders: () => [
+              {
+                provider: 'Bad_ID',
+                displayName: 'Bad',
+                settingsNs: 'llm-pi-ai',
+                settingsPath: ['providers', 'Bad_ID'],
+                nativeAuth: { env: ['BAD_KEY'], oauth: true },
+              },
+            ],
+          }
+        : name === 'settings'
+          ? { describe: () => [{ ns: 'llm-pi-ai', value: { providers: { Bad_ID: {} } } }] }
+          : name === 'credentials'
+            ? { describe: async () => ({ configured: false, writable: true }) }
+            : base.get(name),
+  });
+  assert.equal(value.providers[0].credential, CREDENTIALS.MISSING);
+  assert.equal(value.providers[0].error, undefined);
 });
 
 test('the provider filter also applies to dormant rows', async () => {

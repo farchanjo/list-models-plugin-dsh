@@ -26,6 +26,7 @@ vanish from the answer. The inventory therefore joins two registry halves:
 | `llm.listModels(provider)` | the catalog one active adapter advertises |
 | `llm.listConfigurableProviders()` | routes declared and not activated |
 | `settings.describe()` + `credentials.describe()` | credential state per route |
+| `credentials.describeRecord()` | a stored sign-in or API-key grant |
 | `agentDefaultModel.currentSelection()` | the default route to mark |
 
 ## Isolation
@@ -92,15 +93,17 @@ presenters receive a compact projection — `generatedAt`, `default`, `counts`,
 
 | Value | Means |
 | --- | --- |
-| `configured` | a sign-in grant is stored, or at least one variable the adapter discovers is set (it may be a non-secret such as an organization or project id) |
+| `configured` | a stored sign-in or API-key record exists, or at least one variable the adapter discovers is set (it may be a non-secret such as an organization or project id) |
 | `missing` | the route declares credentials and none of them is set |
 | `not-applicable` | the route declares no reference at all and has no sign-in flow, so nothing can be missing |
 | `unknown` | the probe could not run or could not answer, never a claim that the key is absent |
 
 Precedence follows the adapter: a profile `apiKeyEnv` wins outright, even when
 it is unset or malformed, because the adapter resolves it before anything else.
-Without one, a stored sign-in grant wins over the environment. `configured`
-means a credential is present, not that a call was made with it.
+Without one, a stored sign-in or API-key record wins over the environment. `configured`
+means a credential is present, not that a call was made with it: an adapter
+that authenticates from a file (an AWS profile, for example) still reads
+`missing`, because only declared variables and stored records are visible.
 
 The `note` "no credential; the adapter advertises nothing" is only attached
 when the adapter was actually asked and answered with an empty catalog.
