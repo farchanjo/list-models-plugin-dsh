@@ -2,7 +2,7 @@
   "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
   "id": "list-models-plugin-dsh",
   "name": "list-models-plugin-dsh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "manifestVersion": "0.15",
   "description": "Read-only model inventory for DSH: registered provider routes, dormant declared routes, and credential state, exposed as one tool.",
   "facets": {

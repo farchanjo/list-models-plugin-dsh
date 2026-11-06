@@ -1,6 +1,6 @@
 {
   "name": "list-models-plugin-dsh",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Read-only model inventory for DSH: lists registered provider routes, dormant configurable routes, and credential state without touching core.",
   "keywords": [
     "dsh",
