@@ -44,11 +44,19 @@ Nothing here resolves a model call or writes settings.
 
 ## Install
 
+Every tagged version ships a packed tarball on the
+[Releases](https://github.com/farchanjo/list-models-plugin-dsh/releases) page:
+
 ```sh
-dsh plugin --profile dsh-tui add /root/dev/list-models-plugin-dsh
+dsh plugin --profile <profile> add \
+  https://github.com/farchanjo/list-models-plugin-dsh/releases/download/v<version>/list-models-plugin-dsh-<version>.tgz
 ```
 
-The bundle patch inserts the row; no manual profile edit is needed.
+Verify the asset against the `.sha256` published beside it before installing.
+Remove with `dsh plugin --profile <profile> remove list-models-plugin-dsh`.
+
+A git clone works too, for development. The release contract — bump, tag,
+assets, checks — lives in [AGENTS.md](AGENTS.md).
 
 ## Tool contract
 

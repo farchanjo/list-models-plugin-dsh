@@ -24,7 +24,8 @@
     "cordis.patch.yml",
     "README.md",
     "LICENSE",
-    "biome.json"
+    "biome.json",
+    "AGENTS.md"
   ],
   "scripts": {
     "test": "node --test \"test/*.test.js\"",
